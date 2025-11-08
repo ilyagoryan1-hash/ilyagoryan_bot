@@ -117,4 +117,18 @@ async def on_startup(_):
 if __name__ == "__main__":
     executor.start_polling(dp, on_startup=on_startup, skip_updates=True)
 
+import threading
+from aiohttp import web
+
+async def healthcheck(request):
+    return web.Response(text="Bot is running!")
+
+def start_web_server():
+    app = web.Application()
+    app.router.add_get("/", healthcheck)
+    web.run_app(app, host="0.0.0.0", port=8080)
+
+# Запуск маленького web-сервера в фоне
+threading.Thread(target=start_web_server, daemon=True).start()
+
 
