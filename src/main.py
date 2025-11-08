@@ -9,9 +9,9 @@ from aiogram.utils import executor
 # -------------------
 # 🔧 НАСТРОЙКИ
 # -------------------
-API_TOKEN = "ТВОЙ_ТОКЕН_БОТА"
+API_TOKEN = "8438210114:AAGxLlAJQPhCVLCayy3ctnSucjQFyySShiY"
 OMDB_API_KEY = "79eef5a0"
-DATABASE_URL = "postgresql://postgres:postgres@localhost:5432/movies"  # Замени на свой
+DATABASE_URL = "postgresql://ilyagoryan_bot_user:z5Msm8ScWmxgMokHwfBvG9OwPRMTyXUD@dpg-d47mv2m3jp1c73c4gshg-a.oregon-postgres.render.com/ilyagoryan_bot"  # Замени на свой
 
 logging.basicConfig(level=logging.INFO)
 
