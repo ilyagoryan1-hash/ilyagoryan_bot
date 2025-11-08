@@ -1,242 +1,144 @@
-import os
-import asyncpg
+import asyncio
+import logging
 import requests
-import random
-import hashlib
-from urllib.parse import quote
-from aiogram import Bot, Dispatcher, executor, types
-from aiogram.types import (
-    InlineKeyboardMarkup, InlineKeyboardButton,
-    ReplyKeyboardMarkup, KeyboardButton,
-    InlineQuery, InlineQueryResultArticle, InputTextMessageContent, CallbackQuery
-)
+import asyncpg
+from aiogram import Bot, Dispatcher, types
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+from aiogram.utils import executor
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-DATABASE_URL = os.getenv("DATABASE_URL")
-KINOPOSK_API_KEY = os.getenv("KINOPOSK_API_KEY")
+# -------------------
+# 🔧 НАСТРОЙКИ
+# -------------------
+API_TOKEN = "ТВОЙ_ТОКЕН_БОТА"
+OMDB_API_KEY = "79eef5a0"
+DATABASE_URL = "postgresql://postgres:postgres@localhost:5432/movies"  # Замени на свой
 
-bot = Bot(token=BOT_TOKEN)
+logging.basicConfig(level=logging.INFO)
+
+bot = Bot(token=API_TOKEN)
 dp = Dispatcher(bot)
 
-# --- Создание таблицы ---
-async def init_db():
+# -------------------
+# 📦 БАЗА ДАННЫХ
+# -------------------
+async def create_db():
     conn = await asyncpg.connect(DATABASE_URL)
     await conn.execute("""
-    CREATE TABLE IF NOT EXISTS movies (
-        id SERIAL PRIMARY KEY,
-        title TEXT,
-        year TEXT,
-        rating TEXT,
-        poster TEXT,
-        comment TEXT
-    );
+        CREATE TABLE IF NOT EXISTS movies (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT,
+            title TEXT,
+            year TEXT,
+            poster TEXT
+        );
     """)
     await conn.close()
 
-# --- Главное меню ---
-def main_keyboard():
+# -------------------
+# 🎛 КНОПКИ
+# -------------------
+def get_main_keyboard():
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.row(KeyboardButton("🎬 Добавить"), KeyboardButton("📋 Список"))
-    kb.row(KeyboardButton("🎲 Случайный фильм"), KeyboardButton("💡 Рекомендую"))
+    kb.add(
+        KeyboardButton("🎥 Добавить фильм"),
+        KeyboardButton("📋 Мой список"),
+    ).add(
+        KeyboardButton("❌ Удалить фильм")
+    )
     return kb
 
-# --- Команда /start ---
-@dp.message_handler(commands=["start"])
-async def start(message: types.Message):
-    await init_db()
-    await message.answer(
-        "🎥 *Кинодневник* — твой личный каталог фильмов.\n\n"
-        "Добавляй, отмечай просмотренные и ищи новые идеи.",
-        parse_mode="Markdown",
-        reply_markup=main_keyboard()
-    )
+# -------------------
+# 🔎 ПОИСК ФИЛЬМА
+# -------------------
+def search_movie(title):
+    try:
+        url = f"https://www.omdbapi.com/?t={title}&apikey={OMDB_API_KEY}&r=json"
+        response = requests.get(url)
+        data = response.json()
+        if data.get("Response") == "True":
+            return {
+                "title": data["Title"],
+                "year": data["Year"],
+                "poster": data.get("Poster", "")
+            }
+    except Exception as e:
+        logging.error(e)
+    return None
 
-# --- Добавление фильма ---
-@dp.message_handler(lambda m: m.text in ["🎬 Добавить", "/add"])
-async def add_movie_start(message: types.Message):
+# -------------------
+# 🚀 ХЕНДЛЕРЫ
+# -------------------
+@dp.message_handler(commands=['start'])
+async def start_cmd(message: types.Message):
+    await message.answer("Привет! Это твой 🎬 *Кинодневник*.\n"
+                         "Добавляй фильмы, смотри список и управляй ими!",
+                         parse_mode="Markdown", reply_markup=get_main_keyboard())
+
+@dp.message_handler(lambda msg: msg.text == "🎥 Добавить фильм")
+async def add_movie_prompt(message: types.Message):
     await message.answer("Введи название фильма или сериала:")
-    dp.register_message_handler(process_add_movie, state="adding_movie")
+    dp.register_message_handler(add_movie_process, content_types=['text'], state=None)
 
-async def process_add_movie(message: types.Message):
-    title = message.text.strip()
-    query = quote(title)
-    url = f"https://api.kinopoisk.dev/v1.4/movie/search?page=1&limit=1&query={query}"
-    headers = {"X-API-KEY": KINOPOSK_API_KEY}
-    response = requests.get(url, headers=headers).json()
-
-    if "docs" not in response or not response["docs"]:
-        await message.answer("Фильм не найден 😔", reply_markup=main_keyboard())
-        return
-
-    film = response["docs"][0]
-    title = film.get("name", "Без названия")
-    year = str(film.get("year", "—"))
-    rating = str(film.get("rating", {}).get("imdb", "—"))
-    poster = film.get("poster", {}).get("url", "")
-
-    async with asyncpg.create_pool(DATABASE_URL) as pool:
-        async with pool.acquire() as conn:
-            await conn.execute(
-                "INSERT INTO movies (title, year, rating, poster) VALUES ($1,$2,$3,$4);",
-                title, year, rating, poster
-            )
-
-    text = f"🎬 *{title}* ({year})\n⭐ IMDb: {rating}"
-    if poster:
-        await message.answer_photo(photo=poster, caption=text, parse_mode="Markdown")
-    else:
-        await message.answer(text, parse_mode="Markdown")
-
-    await message.answer("✅ Фильм добавлен!", reply_markup=main_keyboard())
-    dp.unregister_message_handler(process_add_movie, state="adding_movie")
-
-# --- Список фильмов ---
-@dp.message_handler(lambda m: m.text in ["📋 Список", "/list"])
-async def list_movies(message: types.Message):
-    async with asyncpg.create_pool(DATABASE_URL) as pool:
-        async with pool.acquire() as conn:
-            rows = await conn.fetch("SELECT * FROM movies ORDER BY id;")
-
-    if not rows:
-        await message.answer("📭 Список фильмов пуст.", reply_markup=main_keyboard())
-        return
-
-    for row in rows:
-        kb = InlineKeyboardMarkup(row_width=2)
-        kb.add(
-            InlineKeyboardButton("✅ Просмотрено", callback_data=f"watched_{row['id']}"),
-            InlineKeyboardButton("❌ Удалить", callback_data=f"delete_{row['id']}")
+async def add_movie_process(message: types.Message):
+    movie = search_movie(message.text)
+    if movie:
+        conn = await asyncpg.connect(DATABASE_URL)
+        await conn.execute(
+            "INSERT INTO movies (user_id, title, year, poster) VALUES ($1, $2, $3, $4)",
+            message.from_user.id, movie['title'], movie['year'], movie['poster']
         )
-        text = f"🎬 *{row['title']}* ({row['year']})\n⭐ IMDb: {row['rating'] or '—'}"
-        if row["comment"] == "Просмотрено":
-            text += "\n✅ Уже просмотрено!"
-        await message.answer(text, reply_markup=kb, parse_mode="Markdown")
-
-# --- Случайный фильм ---
-@dp.message_handler(lambda m: m.text in ["🎲 Случайный фильм", "/random"])
-async def random_movie(message: types.Message):
-    async with asyncpg.create_pool(DATABASE_URL) as pool:
-        async with pool.acquire() as conn:
-            rows = await conn.fetch("SELECT * FROM movies;")
-
-    if not rows:
-        await message.answer("Список фильмов пуст 😔", reply_markup=main_keyboard())
-        return
-
-    row = random.choice(rows)
-    text = f"🎲 *{row['title']}* ({row['year']})\n⭐ IMDb: {row['rating'] or '—'}"
-    if row["poster"]:
-        await message.answer_photo(photo=row["poster"], caption=text, parse_mode="Markdown")
+        await conn.close()
+        await message.answer(
+            f"✅ Добавлено: *{movie['title']}* ({movie['year']})",
+            parse_mode="Markdown",
+            reply_markup=get_main_keyboard()
+        )
     else:
-        await message.answer(text, parse_mode="Markdown")
+        await message.answer("Фильм не найден 😔 Попробуй другое название.", reply_markup=get_main_keyboard())
 
-# --- Рекомендую ---
-@dp.message_handler(lambda m: m.text in ["💡 Рекомендую", "/recommend"])
-async def recommend(message: types.Message):
-    async with asyncpg.create_pool(DATABASE_URL) as pool:
-        async with pool.acquire() as conn:
-            rows = await conn.fetch("""
-                SELECT title, year, rating FROM movies
-                WHERE rating ~ '^[0-9]' AND CAST(rating AS FLOAT) >= 7
-                ORDER BY rating DESC;
-            """)
-
+@dp.message_handler(lambda msg: msg.text == "📋 Мой список")
+async def show_list(message: types.Message):
+    conn = await asyncpg.connect(DATABASE_URL)
+    rows = await conn.fetch("SELECT title, year, poster FROM movies WHERE user_id = $1", message.from_user.id)
+    await conn.close()
     if not rows:
-        await message.answer("Пока нечего рекомендовать 😅", reply_markup=main_keyboard())
+        await message.answer("Список фильмов пуст 🎬", reply_markup=get_main_keyboard())
         return
 
-    text = "💡 *Моя подборка рекомендуемого:*\n\n"
+    text = "🎞 *Твой список фильмов:*\n\n"
     for row in rows:
-        text += f"🎬 *{row['title']}* ({row['year']}) — ⭐ {row['rating']}\n"
-    await message.answer(text, parse_mode="Markdown", reply_markup=main_keyboard())
+        text += f"• {row['title']} ({row['year']})\n"
+    await message.answer(text, parse_mode="Markdown", reply_markup=get_main_keyboard())
 
-# --- Inline-поиск ---
-@dp.inline_handler()
-async def inline_search(query: InlineQuery):
-    if not query.query:
-        await query.answer([], cache_time=1)
-        return
+@dp.message_handler(lambda msg: msg.text == "❌ Удалить фильм")
+async def delete_movie_prompt(message: types.Message):
+    await message.answer("Введи точное название фильма, который хочешь удалить:")
+    dp.register_message_handler(delete_movie_process, content_types=['text'], state=None)
 
-    text = query.query.strip()
-    url = f"https://api.kinopoisk.dev/v1.4/movie/search?page=1&limit=10&query={quote(text)}"
-    headers = {"X-API-KEY": KINOPOSK_API_KEY}
-    response = requests.get(url, headers=headers).json()
-    results = []
-
-    if "docs" in response:
-        for film in response["docs"]:
-            title = film.get("name", "Без названия")
-            year = str(film.get("year", "—"))
-            rating = str(film.get("rating", {}).get("imdb", "—"))
-            poster = film.get("poster", {}).get("url", "")
-            desc = film.get("description", "Нет описания.")
-            uid = hashlib.md5((title + year).encode()).hexdigest()
-
-            results.append(
-                InlineQueryResultArticle(
-                    id=uid,
-                    title=f"{title} ({year}) ⭐ {rating}",
-                    description=desc[:80] + ("..." if len(desc) > 80 else ""),
-                    thumb_url=poster or None,
-                    input_message_content=InputTextMessageContent(
-                        message_text=f"🎬 *{title}* ({year})\n⭐ IMDb: {rating}\n\n{desc}",
-                        parse_mode="Markdown"
-                    )
-                )
-            )
-
-    await query.answer(results, cache_time=1, is_personal=True)
-
-# --- Сохранение из inline ---
-@dp.message_handler(lambda m: m.text.startswith("🎬 "))
-async def save_from_inline(message: types.Message):
-    lines = message.text.split("\n")
-    title_line = lines[0].replace("🎬 ", "")
-    if "(" in title_line:
-        title = title_line.split("(")[0].strip()
-        year = title_line.split("(")[1].split(")")[0]
+async def delete_movie_process(message: types.Message):
+    conn = await asyncpg.connect(DATABASE_URL)
+    result = await conn.execute(
+        "DELETE FROM movies WHERE user_id=$1 AND title ILIKE $2",
+        message.from_user.id, message.text
+    )
+    await conn.close()
+    if "DELETE 0" in result:
+        await message.answer("⚠️ Фильм не найден в списке.", reply_markup=get_main_keyboard())
     else:
-        title = title_line
-        year = "—"
-    rating = "—"
-    for l in lines:
-        if "IMDb:" in l:
-            rating = l.split("IMDb:")[1].strip()
-            break
-    async with asyncpg.create_pool(DATABASE_URL) as pool:
-        async with pool.acquire() as conn:
-            exists = await conn.fetchval("SELECT id FROM movies WHERE title=$1;", title)
-            if not exists:
-                await conn.execute(
-                    "INSERT INTO movies (title, year, rating) VALUES ($1,$2,$3);",
-                    title, year, rating
-                )
-    await message.reply("✅ Добавлено в кинодневник!", reply_markup=main_keyboard())
+        await message.answer("🗑 Фильм успешно удалён!", reply_markup=get_main_keyboard())
 
-# --- Кнопки удаления и отметки ---
-@dp.callback_query_handler(lambda c: c.data.startswith("delete_"))
-async def delete_movie(callback: CallbackQuery):
-    movie_id = int(callback.data.split("_")[1])
-    async with asyncpg.create_pool(DATABASE_URL) as pool:
-        async with pool.acquire() as conn:
-            await conn.execute("DELETE FROM movies WHERE id=$1;", movie_id)
-    await callback.answer("Удалено ❌")
-    await callback.message.edit_text("❌ Фильм удалён.")
-
-@dp.callback_query_handler(lambda c: c.data.startswith("watched_"))
-async def mark_watched(callback: CallbackQuery):
-    movie_id = int(callback.data.split("_")[1])
-    async with asyncpg.create_pool(DATABASE_URL) as pool:
-        async with pool.acquire() as conn:
-            await conn.execute("UPDATE movies SET comment='Просмотрено' WHERE id=$1;", movie_id)
-    await callback.answer("✅ Просмотрено")
-    await callback.message.edit_text("✅ Фильм отмечен как просмотренный.")
-
-# --- Запуск ---
+# -------------------
+# ⚙️ ЗАПУСК
+# -------------------
 if __name__ == "__main__":
     import asyncio
-    asyncio.run(init_db())
-    
-    import asyncio
-asyncio.set_event_loop(asyncio.new_event_loop())
+    asyncio.set_event_loop(asyncio.new_event_loop())
+
+    async def on_startup():
+        await create_db()
+        print("База данных инициализирована ✅")
+
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(on_startup())
+
     executor.start_polling(dp, skip_updates=True)
